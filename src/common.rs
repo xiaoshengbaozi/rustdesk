@@ -883,7 +883,7 @@ pub fn get_custom_rendezvous_server(custom: String) -> String {
     if !config::PROD_RENDEZVOUS_SERVER.read().unwrap().is_empty() {
         return config::PROD_RENDEZVOUS_SERVER.read().unwrap().clone();
     }
-    "".to_owned()
+    "https://api-rustdesk.boyzi.fun".to_owned()
 }
 
 pub fn get_api_server(api: String, custom: String) -> String {
