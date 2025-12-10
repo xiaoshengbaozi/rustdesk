@@ -360,7 +360,7 @@ class _ViewCameraPageState extends State<ViewCameraPage>
     super.build(context);
     return WillPopScope(
         onWillPop: () async {
-          clientClose(sessionId, _ffi.dialogManager);
+          clientClose(sessionId, _ffi);
           return false;
         },
         child: MultiProvider(providers: [
@@ -515,8 +515,6 @@ class ImagePaint extends StatefulWidget {
 }
 
 class _ImagePaintState extends State<ImagePaint> {
-  bool _lastRemoteCursorMoved = false;
-
   String get id => widget.id;
   RxBool get cursorOverImage => widget.cursorOverImage;
   Widget Function(Widget)? get listenerBuilder => widget.listenerBuilder;
@@ -529,7 +527,7 @@ class _ImagePaintState extends State<ImagePaint> {
 
     bool isViewOriginal() => c.viewStyle.style == kRemoteViewStyleOriginal;
 
-    if (c.imageOverflow.isTrue && c.scrollStyle == ScrollStyle.scrollbar) {
+    if (c.imageOverflow.isTrue && c.scrollStyle != ScrollStyle.scrollauto) {
       final paintWidth = c.getDisplayWidth() * s;
       final paintHeight = c.getDisplayHeight() * s;
       final paintSize = Size(paintWidth, paintHeight);

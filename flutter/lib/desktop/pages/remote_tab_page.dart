@@ -80,7 +80,15 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
         label: peerId!,
         selectedIcon: selectedIcon,
         unselectedIcon: unselectedIcon,
-        onTabCloseButton: () => tabController.closeBy(peerId),
+        onTabCloseButton: () async {
+          if (await desktopTryShowTabAuditDialogCloseCancelled(
+            id: peerId!,
+            tabController: tabController,
+          )) {
+            return;
+          }
+          tabController.closeBy(peerId!);
+        },
         page: RemotePage(
           key: ValueKey(peerId),
           id: peerId!,
@@ -146,16 +154,8 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
                 connectionType.secure.value == ConnectionType.strSecure;
             bool direct =
                 connectionType.direct.value == ConnectionType.strDirect;
-            String msgConn;
-            if (secure && direct) {
-              msgConn = translate("Direct and encrypted connection");
-            } else if (secure && !direct) {
-              msgConn = translate("Relayed and encrypted connection");
-            } else if (!secure && direct) {
-              msgConn = translate("Direct and unencrypted connection");
-            } else {
-              msgConn = translate("Relayed and unencrypted connection");
-            }
+            String msgConn = getConnectionText(
+                secure, direct, connectionType.stream_type.value);
             var msgFingerprint = '${translate('Fingerprint')}:\n';
             var fingerprint = FingerprintState.find(key).value;
             if (fingerprint.isEmpty) {
@@ -324,7 +324,13 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           translate('Close'),
           style: style,
         ),
-        proc: () {
+        proc: () async {
+          if (await desktopTryShowTabAuditDialogCloseCancelled(
+            id: key,
+            tabController: tabController,
+          )) {
+            return;
+          }
           tabController.closeBy(key);
           cancelFunc();
         },
@@ -377,6 +383,14 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
 
   Future<bool> handleWindowCloseButton() async {
     final connLength = tabController.length;
+    if (connLength == 1) {
+      if (await desktopTryShowTabAuditDialogCloseCancelled(
+        id: tabController.state.value.tabs[0].key,
+        tabController: tabController,
+      )) {
+        return false;
+      }
+    }
     if (connLength <= 1) {
       tabController.clear();
       return true;
@@ -431,7 +445,15 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
         label: id,
         selectedIcon: selectedIcon,
         unselectedIcon: unselectedIcon,
-        onTabCloseButton: () => tabController.closeBy(id),
+        onTabCloseButton: () async {
+          if (await desktopTryShowTabAuditDialogCloseCancelled(
+            id: id,
+            tabController: tabController,
+          )) {
+            return;
+          }
+          tabController.closeBy(id);
+        },
         page: RemotePage(
           key: ValueKey(id),
           id: id,

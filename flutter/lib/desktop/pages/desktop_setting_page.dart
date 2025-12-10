@@ -11,6 +11,7 @@ import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_home_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
+import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/mobile/widgets/dialog.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/printer_model.dart';
@@ -76,7 +77,9 @@ class DesktopSettingPage extends StatefulWidget {
     if (!isWeb && !bind.isIncomingOnly() && bind.pluginFeatureIsEnabled())
       SettingsTabKey.plugin,
     if (!bind.isDisableAccount()) SettingsTabKey.account,
-    if (isWindows) SettingsTabKey.printer,
+    if (isWindows &&
+        bind.mainGetBuildinOption(key: kOptionHideRemotePrinterSetting) != 'Y')
+      SettingsTabKey.printer,
     SettingsTabKey.about,
   ];
 
@@ -470,6 +473,8 @@ class _GeneralState extends State<_General> {
   }
 
   Widget other() {
+    final showAutoUpdate =
+        isWindows && bind.mainIsInstalled() && !bind.isCustomClient();
     final children = <Widget>[
       if (!isWeb && !bind.isIncomingOnly())
         _OptionCheckBox(context, 'Confirm before closing multiple tabs',
@@ -523,18 +528,45 @@ class _GeneralState extends State<_General> {
             kOptionEnableCheckUpdate,
             isServer: false,
           ),
+        if (showAutoUpdate)
+          _OptionCheckBox(
+            context,
+            'Auto update',
+            kOptionAllowAutoUpdate,
+            isServer: true,
+          ),
         if (isWindows && !bind.isOutgoingOnly())
           _OptionCheckBox(
             context,
             'Capture screen using DirectX',
             kOptionDirectxCapture,
-          )
+          ),
+        if (!bind.isIncomingOnly()) ...[
+          _OptionCheckBox(
+            context,
+            'Enable UDP hole punching',
+            kOptionEnableUdpPunch,
+            isServer: false,
+          ),
+          _OptionCheckBox(
+            context,
+            'Enable IPv6 P2P connection',
+            kOptionEnableIpv6Punch,
+            isServer: false,
+          ),
+        ],
       ],
     ];
     if (!isWeb && bind.mainShowOption(key: kOptionAllowLinuxHeadless)) {
       children.add(_OptionCheckBox(
           context, 'Allow linux headless', kOptionAllowLinuxHeadless));
     }
+    children.add(_OptionCheckBox(
+      context,
+      'note-at-conn-end-tip',
+      kOptionAllowAskForNoteAtEndOfConnection,
+      isServer: false,
+    ));
     return _Card(title: 'Other', children: children);
   }
 
@@ -986,6 +1018,8 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                 enabled: enabled, fakeValue: fakeValue),
             _OptionCheckBox(context, 'Enable camera', kOptionEnableCamera,
                 enabled: enabled, fakeValue: fakeValue),
+            _OptionCheckBox(context, 'Enable terminal', kOptionEnableTerminal,
+                enabled: enabled, fakeValue: fakeValue),
             _OptionCheckBox(
                 context, 'Enable TCP tunneling', kOptionEnableTunnel,
                 enabled: enabled, fakeValue: fakeValue),
@@ -1086,6 +1120,34 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                   ))
               .toList();
 
+          final isOptFixedNumOTP =
+              isOptionFixed(kOptionAllowNumericOneTimePassword);
+          final isNumOPTChangable = !isOptFixedNumOTP && tmpEnabled && !locked;
+          final numericOneTimePassword = GestureDetector(
+            child: InkWell(
+                child: Row(
+              children: [
+                Checkbox(
+                        value: model.allowNumericOneTimePassword,
+                        onChanged: isNumOPTChangable
+                            ? (bool? v) {
+                                model.switchAllowNumericOneTimePassword();
+                              }
+                            : null)
+                    .marginOnly(right: 5),
+                Expanded(
+                    child: Text(
+                  translate('Numeric one-time password'),
+                  style: TextStyle(
+                      color: disabledTextColor(context, isNumOPTChangable)),
+                ))
+              ],
+            )),
+            onTap: isNumOPTChangable
+                ? () => model.switchAllowNumericOneTimePassword()
+                : null,
+          ).marginOnly(left: _kContentHSubMargin - 5);
+
           final modeKeys = <String>[
             'password',
             'click',
@@ -1122,6 +1184,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                     ],
                   ),
                   enabled: tmpEnabled && !locked),
+            if (usePassword) numericOneTimePassword,
             if (usePassword) radios[1],
             if (usePassword)
               _SubButton('Set permanent password', setPasswordDialog,
@@ -1466,11 +1529,90 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
         bind.mainGetBuildinOption(key: kOptionHideServerSetting) == 'Y';
     final hideProxy =
         isWeb || bind.mainGetBuildinOption(key: kOptionHideProxySetting) == 'Y';
+    final hideWebSocket = isWeb ||
+        bind.mainGetBuildinOption(key: kOptionHideWebSocketSetting) == 'Y';
 
-    if (hideServer && hideProxy) {
+    if (hideServer && hideProxy && hideWebSocket) {
       return Offstage();
     }
 
+    // Helper function to create network setting ListTiles
+    Widget listTile({
+      required IconData icon,
+      required String title,
+      VoidCallback? onTap,
+      Widget? trailing,
+      bool showTooltip = false,
+      String tooltipMessage = '',
+    }) {
+      final titleWidget = showTooltip
+          ? Row(
+              children: [
+                Tooltip(
+                  waitDuration: Duration(milliseconds: 1000),
+                  message: translate(tooltipMessage),
+                  child: Row(
+                    children: [
+                      Text(
+                        translate(title),
+                        style: TextStyle(fontSize: _kContentFontSize),
+                      ),
+                      SizedBox(width: 5),
+                      Icon(
+                        Icons.help_outline,
+                        size: 14,
+                        color: Theme.of(context)
+                            .textTheme
+                            .titleLarge
+                            ?.color
+                            ?.withOpacity(0.7),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            )
+          : Text(
+              translate(title),
+              style: TextStyle(fontSize: _kContentFontSize),
+            );
+
+      return ListTile(
+        leading: Icon(icon, color: _accentColor),
+        title: titleWidget,
+        enabled: !locked,
+        onTap: onTap,
+        trailing: trailing,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+        ),
+        contentPadding: EdgeInsets.symmetric(horizontal: 16),
+        minLeadingWidth: 0,
+        horizontalTitleGap: 10,
+      );
+    }
+
+    Widget switchWidget(IconData icon, String title, String tooltipMessage,
+            String optionKey) =>
+        listTile(
+          icon: icon,
+          title: title,
+          showTooltip: true,
+          tooltipMessage: tooltipMessage,
+          trailing: Switch(
+            value: mainGetBoolOptionSync(optionKey),
+            onChanged: locked || isOptionFixed(optionKey)
+                ? null
+                : (value) {
+                    mainSetBoolOption(optionKey, value);
+                    setState(() {});
+                  },
+          ),
+        );
+
+    final outgoingOnly = bind.isOutgoingOnly();
+
+    final divider = const Divider(height: 1, indent: 16, endIndent: 16);
     return _Card(
       title: 'Network',
       children: [
@@ -1479,39 +1621,68 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               if (!hideServer)
-                ListTile(
-                  leading: Icon(Icons.dns_outlined, color: _accentColor),
-                  title: Text(
-                    translate('ID/Relay Server'),
-                    style: TextStyle(fontSize: _kContentFontSize),
-                  ),
-                  enabled: !locked,
-                  onTap: () => showServerSettings(gFFI.dialogManager),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  contentPadding: EdgeInsets.symmetric(horizontal: 16),
-                  minLeadingWidth: 0,
-                  horizontalTitleGap: 10,
+                listTile(
+                  icon: Icons.dns_outlined,
+                  title: 'ID/Relay Server',
+                  onTap: () => showServerSettings(gFFI.dialogManager, setState),
                 ),
-              if (!hideServer && !hideProxy)
-                Divider(height: 1, indent: 16, endIndent: 16),
+              if (!hideProxy && !hideServer) divider,
               if (!hideProxy)
-                ListTile(
-                  leading:
-                      Icon(Icons.network_ping_outlined, color: _accentColor),
-                  title: Text(
-                    translate('Socks5/Http(s) Proxy'),
-                    style: TextStyle(fontSize: _kContentFontSize),
-                  ),
-                  enabled: !locked,
+                listTile(
+                  icon: Icons.network_ping_outlined,
+                  title: 'Socks5/Http(s) Proxy',
                   onTap: changeSocks5Proxy,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  contentPadding: EdgeInsets.symmetric(horizontal: 16),
-                  minLeadingWidth: 0,
-                  horizontalTitleGap: 10,
+                ),
+              if (!hideWebSocket && (!hideServer || !hideProxy)) divider,
+              if (!hideWebSocket)
+                switchWidget(
+                    Icons.web_asset_outlined,
+                    'Use WebSocket',
+                    '${translate('websocket_tip')}\n\n${translate('server-oss-not-support-tip')}',
+                    kOptionAllowWebSocket),
+              if (!isWeb)
+                futureBuilder(
+                  future: bind.mainIsUsingPublicServer(),
+                  hasData: (isUsingPublicServer) {
+                    if (isUsingPublicServer) {
+                      return Offstage();
+                    } else {
+                      return Column(
+                        children: [
+                          if (!hideServer || !hideProxy || !hideWebSocket)
+                            divider,
+                          switchWidget(
+                              Icons.no_encryption_outlined,
+                              'Allow insecure TLS fallback',
+                              'allow-insecure-tls-fallback-tip',
+                              kOptionAllowInsecureTLSFallback),
+                          if (!outgoingOnly) divider,
+                          if (!outgoingOnly)
+                            listTile(
+                              icon: Icons.lan_outlined,
+                              title: 'Disable UDP',
+                              showTooltip: true,
+                              tooltipMessage:
+                                  '${translate('disable-udp-tip')}\n\n${translate('server-oss-not-support-tip')}',
+                              trailing: Switch(
+                                value: bind.mainGetOptionSync(
+                                        key: kOptionDisableUdp) ==
+                                    'Y',
+                                onChanged:
+                                    locked || isOptionFixed(kOptionDisableUdp)
+                                        ? null
+                                        : (value) async {
+                                            await bind.mainSetOption(
+                                                key: kOptionDisableUdp,
+                                                value: value ? 'Y' : 'N');
+                                            setState(() {});
+                                          },
+                              ),
+                            ),
+                        ],
+                      );
+                    }
+                  },
                 ),
             ],
           ),
@@ -1537,6 +1708,7 @@ class _DisplayState extends State<_Display> {
       scrollStyle(context),
       imageQuality(context),
       codec(context),
+      if (isDesktop) trackpadSpeed(context),
       if (!isWeb) privacyModeImpl(context),
       other(context),
     ]).marginOnly(bottom: _kListViewBottomMargin);
@@ -1573,6 +1745,13 @@ class _DisplayState extends State<_Display> {
     }
 
     final groupValue = bind.mainGetUserDefaultOption(key: kOptionScrollStyle);
+
+    onEdgeScrollEdgeThicknessChanged(double value) async {
+      await bind.mainSetUserDefaultOption(
+          key: kOptionEdgeScrollEdgeThickness, value: value.round().toString());
+      setState(() {});
+    }
+
     return _Card(title: 'Default Scroll Style', children: [
       _Radio(context,
           value: kRemoteScrollStyleAuto,
@@ -1584,6 +1763,23 @@ class _DisplayState extends State<_Display> {
           groupValue: groupValue,
           label: 'Scrollbar',
           onChanged: isOptFixed ? null : onChanged),
+      if (!isWeb) ...[
+        _Radio(context,
+            value: kRemoteScrollStyleEdge,
+            groupValue: groupValue,
+            label: 'ScrollEdge',
+            onChanged: isOptFixed ? null : onChanged),
+        Offstage(
+            offstage: groupValue != kRemoteScrollStyleEdge,
+            child: EdgeThicknessControl(
+              value: double.tryParse(bind.mainGetUserDefaultOption(
+                      key: kOptionEdgeScrollEdgeThickness)) ??
+                  100.0,
+              onChanged: isOptionFixed(kOptionEdgeScrollEdgeThickness)
+                  ? null
+                  : onEdgeScrollEdgeThicknessChanged,
+            )),
+      ],
     ]);
   }
 
@@ -1621,6 +1817,26 @@ class _DisplayState extends State<_Display> {
         offstage: groupValue != kRemoteImageQualityCustom,
         child: customImageQualitySetting(),
       )
+    ]);
+  }
+
+  Widget trackpadSpeed(BuildContext context) {
+    final initSpeed =
+        (int.tryParse(bind.mainGetUserDefaultOption(key: kKeyTrackpadSpeed)) ??
+            kDefaultTrackpadSpeed);
+    final curSpeed = SimpleWrapper(initSpeed);
+    void onDebouncer(int v) {
+      bind.mainSetUserDefaultOption(
+          key: kKeyTrackpadSpeed, value: v.toString());
+      // It's better to notify all sessions that the default speed is changed.
+      // But it may also be ok to take effect in the next connection.
+    }
+
+    return _Card(title: 'Default trackpad speed', children: [
+      TrackpadSpeedWidget(
+        value: curSpeed,
+        onDebouncer: onDebouncer,
+      ),
     ]);
   }
 
@@ -1908,7 +2124,7 @@ class __PrinterState extends State<_Printer> {
     final scrollController = ScrollController();
     return ListView(controller: scrollController, children: [
       outgoing(context),
-      incomming(context),
+      incoming(context),
     ]).marginOnly(bottom: _kListViewBottomMargin);
   }
 
@@ -1979,7 +2195,7 @@ class __PrinterState extends State<_Printer> {
     final installed = bind.mainIsInstalled();
     // `is-printer-installed` may fail, but it's rare case.
     // Add additional error message here if it's really needed.
-    final driver_installed =
+    final isPrinterInstalled =
         bind.mainGetCommonSync(key: 'is-printer-installed') == 'true';
 
     final List<Widget> children = [];
@@ -1988,22 +2204,22 @@ class __PrinterState extends State<_Printer> {
     } else {
       children.addAll([
         if (!installed) tipClientNotInstalled(),
-        if (installed && !driver_installed) tipPrinterNotInstalled(),
-        if (installed && driver_installed) tipReady()
+        if (installed && !isPrinterInstalled) tipPrinterNotInstalled(),
+        if (installed && isPrinterInstalled) tipReady()
       ]);
     }
     return _Card(title: 'Outgoing Print Jobs', children: children);
   }
 
-  Widget incomming(BuildContext context) {
+  Widget incoming(BuildContext context) {
     onRadioChanged(String value) async {
       await bind.mainSetLocalOption(
-          key: kKeyPrinterIncommingJobAction, value: value);
+          key: kKeyPrinterIncomingJobAction, value: value);
       setState(() {});
     }
 
     PrinterOptions printerOptions = PrinterOptions.load();
-    return _Card(title: 'Incomming Print Jobs', children: [
+    return _Card(title: 'Incoming Print Jobs', children: [
       _Radio(context,
           value: kValuePrinterIncomingJobDismiss,
           groupValue: printerOptions.action,

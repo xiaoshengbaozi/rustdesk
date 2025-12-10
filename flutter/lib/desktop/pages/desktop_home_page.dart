@@ -12,17 +12,18 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/connection_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
+import 'package:flutter_hbb/desktop/widgets/update_progress.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/plugin/ui_manager.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/utils/platform_channel.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:window_size/window_size.dart' as window_size;
-
 import '../widgets/button.dart';
 
 class DesktopHomePage extends StatefulWidget {
@@ -433,13 +434,23 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         updateUrl.isNotEmpty &&
         !isCardClosed &&
         bind.mainUriPrefixSync().contains('rustdesk')) {
+      final isToUpdate = (isWindows || isMacOS) && bind.mainIsInstalled();
+      String btnText = isToUpdate ? 'Update' : 'Download';
+      GestureTapCallback onPressed = () async {
+        final Uri url = Uri.parse('https://rustdesk.com/download');
+        await launchUrl(url);
+      };
+      if (isToUpdate) {
+        onPressed = () {
+          handleUpdate(updateUrl);
+        };
+      }
       return buildInstallCard(
           "Status",
           "${translate("new-version-of-{${bind.mainGetAppNameSync()}}-tip")} (${bind.mainGetNewVersion()}).",
-          "Click to download", () async {
-        final Uri url = Uri.parse('https://rustdesk.com/download');
-        await launchUrl(url);
-      }, closeButton: true);
+          btnText,
+          onPressed,
+          closeButton: true);
     }
     if (systemError.isNotEmpty) {
       return buildInstallCard("", systemError, "", () {});
@@ -750,9 +761,19 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           'scaleFactor': screen.scaleFactor,
         };
 
+    bool isChattyMethod(String methodName) {
+      switch (methodName) {
+        case kWindowBumpMouse: return true;
+      }
+
+      return false;
+    }
+
     rustDeskWinManager.setMethodHandler((call, fromWindowId) async {
-      debugPrint(
+      if (!isChattyMethod(call.method)) {
+        debugPrint(
           "[Main] call ${call.method} with args ${call.arguments} from window $fromWindowId");
+      }
       if (call.method == kWindowMainWindowOnTop) {
         windowOnTop(null);
       } else if (call.method == kWindowGetWindowInfo) {
@@ -776,12 +797,17 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           call.arguments['id'],
           isFileTransfer: call.arguments['isFileTransfer'],
           isViewCamera: call.arguments['isViewCamera'],
+          isTerminal: call.arguments['isTerminal'],
           isTcpTunneling: call.arguments['isTcpTunneling'],
           isRDP: call.arguments['isRDP'],
           password: call.arguments['password'],
           forceRelay: call.arguments['forceRelay'],
           connToken: call.arguments['connToken'],
         );
+      } else if (call.method == kWindowBumpMouse) {
+        return RdPlatformChannel.instance.bumpMouse(
+          dx: call.arguments['dx'],
+          dy: call.arguments['dy']);
       } else if (call.method == kWindowEventMoveTabToNewWindow) {
         final args = call.arguments.split(',');
         int? windowId;

@@ -5,17 +5,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use rdev::{Event, EventType::*, KeyCode};
-use std::{
-    collections::HashMap,
-    ffi::c_void,
-    ops::{Deref, DerefMut},
-    str::FromStr,
-    sync::{Arc, Mutex, RwLock},
-    time::SystemTime,
-};
-use uuid::Uuid;
-
+#[cfg(all(target_os = "windows", not(feature = "flutter")))]
+use hbb_common::config::keys;
 #[cfg(not(feature = "flutter"))]
 use hbb_common::fs;
 use hbb_common::{
@@ -29,8 +20,22 @@ use hbb_common::{
         sync::mpsc,
         time::{Duration as TokioDuration, Instant},
     },
-    Stream,
+    whoami, Stream,
 };
+use rdev::{Event, EventType::*, KeyCode};
+#[cfg(all(feature = "vram", feature = "flutter"))]
+use std::ffi::c_void;
+use std::{
+    collections::HashMap,
+    ops::{Deref, DerefMut},
+    str::FromStr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, RwLock,
+    },
+    time::SystemTime,
+};
+use uuid::Uuid;
 
 use crate::client::io_loop::Remote;
 use crate::client::{
@@ -59,6 +64,11 @@ pub struct Session<T: InvokeUiSession> {
     pub last_change_display: Arc<Mutex<ChangeDisplayRecord>>,
     pub connection_round_state: Arc<Mutex<ConnectionRoundState>>,
     pub printer_names: Arc<RwLock<HashMap<i32, String>>>,
+    // Indicate whether the session is reconnected.
+    // Used to auto start file transfer after reconnection.
+    pub reconnect_count: Arc<AtomicUsize>,
+    pub last_audit_note: Arc<Mutex<String>>,
+    pub audit_guid: Arc<Mutex<String>>,
 }
 
 #[derive(Clone)]
@@ -191,8 +201,20 @@ impl<T: InvokeUiSession> Session<T> {
             .eq(&ConnType::FILE_TRANSFER)
     }
 
+    pub fn is_default(&self) -> bool {
+        self.lc
+            .read()
+            .unwrap()
+            .conn_type
+            .eq(&ConnType::DEFAULT_CONN)
+    }
+
     pub fn is_view_camera(&self) -> bool {
         self.lc.read().unwrap().conn_type.eq(&ConnType::VIEW_CAMERA)
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        self.lc.read().unwrap().conn_type.eq(&ConnType::TERMINAL)
     }
 
     pub fn is_port_forward(&self) -> bool {
@@ -218,6 +240,10 @@ impl<T: InvokeUiSession> Session<T> {
         self.lc.read().unwrap().scroll_style.clone()
     }
 
+    pub fn get_edge_scroll_edge_thickness(&self) -> i32 {
+        self.lc.read().unwrap().edge_scroll_edge_thickness
+    }
+
     pub fn get_image_quality(&self) -> String {
         self.lc.read().unwrap().image_quality.clone()
     }
@@ -228,6 +254,10 @@ impl<T: InvokeUiSession> Session<T> {
 
     pub fn get_peer_version(&self) -> i64 {
         self.lc.read().unwrap().version.clone()
+    }
+
+    pub fn get_trackpad_speed(&self) -> i32 {
+        self.lc.read().unwrap().trackpad_speed
     }
 
     pub fn fallback_keyboard_mode(&self) -> String {
@@ -326,6 +356,13 @@ impl<T: InvokeUiSession> Session<T> {
         self.lc.write().unwrap().save_scroll_style(value);
     }
 
+    pub fn save_edge_scroll_edge_thickness(&self, value: i32) {
+        self.lc
+            .write()
+            .unwrap()
+            .save_edge_scroll_edge_thickness(value);
+    }
+
     pub fn save_flutter_option(&self, k: String, v: String) {
         self.lc.write().unwrap().save_ui_flutter(k, v);
     }
@@ -337,7 +374,7 @@ impl<T: InvokeUiSession> Session<T> {
     pub fn toggle_option(&self, name: String) {
         let msg = self.lc.write().unwrap().toggle_option(name.clone());
         #[cfg(all(target_os = "windows", not(feature = "flutter")))]
-        if name == hbb_common::config::keys::OPTION_ENABLE_FILE_COPY_PASTE {
+        if name == keys::OPTION_ENABLE_FILE_COPY_PASTE {
             self.send(Data::ToggleClipboardFile);
         }
         if let Some(msg) = msg {
@@ -412,6 +449,14 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::RecordScreen(start));
     }
 
+    pub fn is_screenshot_supported(&self) -> bool {
+        crate::common::is_support_screenshot_num(self.lc.read().unwrap().version)
+    }
+
+    pub fn take_screenshot(&self, display: i32, sid: String) {
+        self.send(Data::TakeScreenshot((display, sid)));
+    }
+
     pub fn is_recording(&self) -> bool {
         self.lc.read().unwrap().record_state
     }
@@ -438,6 +483,10 @@ impl<T: InvokeUiSession> Session<T> {
                 self.send(Data::Message(msg));
             }
         }
+    }
+
+    pub fn save_trackpad_speed(&self, trackpad_speed: i32) {
+        self.lc.write().unwrap().save_trackpad_speed(trackpad_speed);
     }
 
     pub fn set_custom_fps(&self, custom_fps: i32) {
@@ -518,9 +567,6 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn get_audit_server(&self, typ: String) -> String {
-        if LocalConfig::get_option("access_token").is_empty() {
-            return "".to_owned();
-        }
         crate::get_audit_server(
             Config::get_option("api-server"),
             Config::get_option("custom-rendezvous-server"),
@@ -532,6 +578,7 @@ impl<T: InvokeUiSession> Session<T> {
         let url = self.get_audit_server("conn".to_string());
         let id = self.get_id();
         let session_id = self.lc.read().unwrap().session_id;
+        *self.last_audit_note.lock().unwrap() = note.clone();
         std::thread::spawn(move || {
             send_note(url, id, session_id, note);
         });
@@ -727,6 +774,56 @@ impl<T: InvokeUiSession> Session<T> {
         });
         let mut msg_out = Message::new();
         msg_out.set_misc(misc);
+        self.send(Data::Message(msg_out));
+    }
+
+    // Terminal methods
+    pub fn open_terminal(&self, terminal_id: i32, rows: u32, cols: u32) {
+        let mut action = TerminalAction::new();
+        action.set_open(OpenTerminal {
+            terminal_id,
+            rows,
+            cols,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_terminal_action(action);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn send_terminal_input(&self, terminal_id: i32, data: String) {
+        let mut action = TerminalAction::new();
+        action.set_data(TerminalData {
+            terminal_id,
+            data: bytes::Bytes::from(data.into_bytes()),
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_terminal_action(action);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn resize_terminal(&self, terminal_id: i32, rows: u32, cols: u32) {
+        let mut action = TerminalAction::new();
+        action.set_resize(ResizeTerminal {
+            terminal_id,
+            rows,
+            cols,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_terminal_action(action);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn close_terminal(&self, terminal_id: i32) {
+        let mut action = TerminalAction::new();
+        action.set_close(CloseTerminal {
+            terminal_id,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_terminal_action(action);
         self.send(Data::Message(msg_out));
     }
 
@@ -1187,11 +1284,14 @@ impl<T: InvokeUiSession> Session<T> {
         drop(connection_round_state_lock);
 
         let cloned = self.clone();
+        *cloned.audit_guid.lock().unwrap() = String::new();
+        *cloned.last_audit_note.lock().unwrap() = String::new();
         // override only if true
         if true == force_relay {
             self.lc.write().unwrap().force_relay = true;
         }
         self.lc.write().unwrap().peer_info = None;
+        self.reconnect_count.fetch_add(1, Ordering::SeqCst);
         let mut lock = self.thread.lock().unwrap();
         // No need to join the previous thread, because it will exit automatically.
         // And the previous thread will not change important states.
@@ -1292,6 +1392,24 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Close);
     }
 
+    fn try_auto_start_job_str(is_reconnected: bool, job_str: &str) -> Option<String> {
+        if is_reconnected {
+            let job_str = job_str.trim();
+            if let Some(stripped) = job_str.strip_suffix('}') {
+                format!(r#"{},"auto_start": true}}"#, stripped).into()
+            } else {
+                // unreachable in normal cases
+                log::warn!(
+                    "The last character is not '}}': {}, auto start is ignored on flutter",
+                    job_str
+                );
+                Some(job_str.to_owned())
+            }
+        } else {
+            None
+        }
+    }
+
     pub fn load_last_jobs(&self) {
         self.clear_all_jobs();
         let pc = self.load_config();
@@ -1299,18 +1417,32 @@ impl<T: InvokeUiSession> Session<T> {
             // no last jobs
             return;
         }
+        let reconnect_count_thr = if cfg!(feature = "flutter") { 0 } else { 1 };
+        let is_reconnected = self.reconnect_count.load(Ordering::SeqCst) > reconnect_count_thr;
         // TODO: can add a confirm dialog
         let mut cnt = 1;
         for job_str in pc.transfer.read_jobs.iter() {
             if !job_str.is_empty() {
-                self.load_last_job(cnt, job_str);
+                self.load_last_job(
+                    cnt,
+                    Self::try_auto_start_job_str(is_reconnected, job_str)
+                        .as_deref()
+                        .unwrap_or(job_str),
+                    is_reconnected,
+                );
                 cnt += 1;
                 log::info!("restore read_job: {:?}", job_str);
             }
         }
         for job_str in pc.transfer.write_jobs.iter() {
             if !job_str.is_empty() {
-                self.load_last_job(cnt, job_str);
+                self.load_last_job(
+                    cnt,
+                    Self::try_auto_start_job_str(is_reconnected, job_str)
+                        .as_deref()
+                        .unwrap_or(job_str),
+                    is_reconnected,
+                );
                 cnt += 1;
                 log::info!("restore write_job: {:?}", job_str);
             }
@@ -1472,7 +1604,7 @@ impl<T: InvokeUiSession> Session<T> {
                                 self.read_remote_dir(remote_dir, show_hidden);
                             }
                         }
-                    } else {
+                    } else if !self.is_terminal() {
                         self.msgbox(
                             "success",
                             "Successful",
@@ -1526,7 +1658,7 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn set_cursor_data(&self, cd: CursorData);
     fn set_cursor_id(&self, id: String);
     fn set_cursor_position(&self, cp: CursorPosition);
-    fn set_display(&self, x: i32, y: i32, w: i32, h: i32, cursor_embedded: bool);
+    fn set_display(&self, x: i32, y: i32, w: i32, h: i32, cursor_embedded: bool, scale: f64);
     fn switch_display(&self, display: &SwitchDisplay);
     fn set_peer_info(&self, peer_info: &PeerInfo); // flutter
     fn set_displays(&self, displays: &Vec<DisplayInfo>);
@@ -1536,14 +1668,14 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn set_permission(&self, name: &str, value: bool);
     fn close_success(&self);
     fn update_quality_status(&self, qs: QualityStatus);
-    fn set_connection_type(&self, is_secured: bool, direct: bool);
+    fn set_connection_type(&self, is_secured: bool, direct: bool, stream_type: &str);
     fn set_fingerprint(&self, fingerprint: String);
     fn job_error(&self, id: i32, err: String, file_num: i32);
     fn job_done(&self, id: i32, file_num: i32);
     fn clear_all_jobs(&self);
     fn new_message(&self, msg: String);
     fn update_transfer_list(&self);
-    fn load_last_job(&self, cnt: i32, job_json: &str);
+    fn load_last_job(&self, cnt: i32, job_json: &str, auto_start: bool);
     fn update_folder_files(
         &self,
         id: i32,
@@ -1586,6 +1718,8 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn update_record_status(&self, start: bool);
     fn update_empty_dirs(&self, _res: ReadEmptyDirsResponse) {}
     fn printer_request(&self, id: i32, path: String);
+    fn handle_screenshot_resp(&self, sid: String, msg: String);
+    fn handle_terminal_response(&self, response: TerminalResponse);
 }
 
 impl<T: InvokeUiSession> Deref for Session<T> {
@@ -1646,7 +1780,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                 self.on_error("No active console user logged on, please connect and logon first.");
                 return;
             }
-        } else if !self.is_port_forward() {
+        } else if !self.is_port_forward() && !self.is_terminal() {
             if pi.displays.is_empty() {
                 self.lc.write().unwrap().handle_peer_info(&pi);
                 self.update_privacy_mode();
@@ -1670,6 +1804,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                 current.width,
                 current.height,
                 current.cursor_embedded,
+                current.scale,
             );
         }
         self.update_privacy_mode();
@@ -1678,7 +1813,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         self.set_peer_info(&pi);
         if self.is_file_transfer() {
             self.close_success();
-        } else if !self.is_port_forward() {
+        } else if !self.is_port_forward() && !self.is_terminal() {
             self.msgbox(
                 "success",
                 "Successful",
@@ -1874,7 +2009,7 @@ pub async fn io_loop<T: InvokeUiSession>(handler: Session<T>, round: u32) {
     }
     let mut remote = Remote::new(handler, receiver, sender);
     remote.io_loop(&key, &token, round).await;
-    remote.sync_jobs_status_to_local().await;
+    let _ = remote.sync_jobs_status_to_local().await;
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
